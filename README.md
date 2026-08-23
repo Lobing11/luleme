@@ -65,3 +65,11 @@ set DEVECO_SDK_HOME=D:\Program Files\DevEco Studio\sdk
 如需在本地运行调试，请在 DevEco Studio 中重新勾选「自动生成签名」，或参考 `build-profile.signed.json5`（该文件已被 `.gitignore` 忽略，不会进入仓库）。
 
 > 注意：本项目为个人健康记录工具，所有数据仅保存在用户设备本地。请在转载、宣传时保持内容健康化，并自行确认应用名称与第三方商标的兼容性。
+
+## 贡献
+
+欢迎任何形式的贡献：Bug 报告、功能建议、代码与文档。
+
+- 提交 Issue 或 PR 前请阅读 [CONTRIBUTING.md](CONTRIBUTING.md)
+- 首次贡献者可先找标有 `good first issue` 的 Issue
+- 贡献者名单会自动展示在仓库右侧 Contributors 区域（通过 PR 合入后自动出现）
