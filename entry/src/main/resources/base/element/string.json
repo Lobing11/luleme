@@ -1,0 +1,16 @@
+{
+  "string": [
+    {
+      "name": "module_desc",
+      "value": "鹿了么 - 本地私密健康记录"
+    },
+    {
+      "name": "EntryAbility_desc",
+      "value": "鹿了么主界面"
+    },
+    {
+      "name": "EntryAbility_label",
+      "value": "鹿了么"
+    }
+  ]
+}

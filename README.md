@@ -1,0 +1,67 @@
+# 🦌 鹿了么
+
+本地私密健康记录 App（HarmonyOS NEXT / ArkTS）。
+
+对标「月经记录」类 App 的交互模式，用于**本地记录**个人自慰/性健康数据。
+所有数据仅保存在设备本地，**应用不申请任何网络权限，不上传任何数据**。
+
+## 功能
+
+- **记录**：一键快速记录 + 详细记录（日期 / 时间 / 心情 5 档 / 备注），支持编辑与删除
+- **日历热力图**：按日记录次数着色的月历（5 档深浅），点击日期查看当天详情
+- **统计**：今日 / 本月 / 总次数、当前连续天数、最长与平均间隔、距上次记录、近 6 个月趋势柱状图（Canvas 自绘）
+- **应用锁**：PIN（4-6 位，加盐 SHA-256 存储）+ 生物识别（指纹 / 人脸），退到后台自动重新锁定
+- **备份**：JSON 导出 / 导入（导入替换现有数据）、清空全部记录
+- **主题**：浅色 / 深色自动适配，粉色系 UI
+
+## 技术要点
+
+| 项目 | 方案 |
+| --- | --- |
+| 语言 / UI | ArkTS + ArkUI 声明式（Stage 模型） |
+| 本地存储 | RelationalStore（SQLite，`records` 表）+ Preferences（设置） |
+| 路由 | Navigation + NavPathStack（NavDestination） |
+| 安全 | `@kit.CryptoArchitectureKit`（SHA-256）、`@kit.UserAuthenticationKit`（生物识别） |
+| 文件 | `@kit.CoreFileKit`（DocumentViewPicker 导出 / 导入） |
+| 测试 | hypium 单元测试（`entry/src/test`，覆盖统计与日历纯函数） |
+
+## 目录结构
+
+```
+entry/src/main/ets/
+├── entryability/       Ability 入口（初始化数据层、后台置锁）
+├── common/             常量（路由名、热力色板）
+├── model/              数据模型（Record / 心情）
+├── data/               RecordRepository（RDB）、SettingsStore（Preferences）
+├── logic/              纯函数：StatsCalculator、CalendarUtil、SecurityUtil
+├── components/         CalendarHeatmap、TrendChart
+└── pages/              Index（首页）、RecordEdit、Stats、Settings、Lock
+```
+
+## 构建
+
+DevEco Studio 5.x（API 24 / HarmonyOS 6.1.1）直接打开工程，连接真机或模拟器运行。
+
+命令行构建（需 DevEco Studio 自带工具链）：
+
+```bat
+set DEVECO_SDK_HOME=D:\Program Files\DevEco Studio\sdk
+"D:\Program Files\DevEco Studio\tools\node\node.exe" ^
+  "D:\Program Files\DevEco Studio\tools\hvigor\hvigor\bin\hvigor.js" ^
+  --mode module -p product=default assembleHap --no-daemon
+```
+
+产物：`entry/build/default/outputs/default/entry-default-unsigned.hap`（未签名，真机调试请在 DevEco Studio 中配置自动签名）。
+
+## 隐私与合规
+
+- 全程无网络权限（`module.json5` 未声明 `ohos.permission.INTERNET`）
+- 上架材料清单见 [`docs/上架准备.md`](docs/上架准备.md)
+
+## 开源许可
+
+本项目基于 [MIT License](LICENSE) 开源，欢迎 Fork、提 Issue 与 PR。
+开源版已剥离本地签名配置（`build-profile.json5` 的 `signingConfigs` 为空）；
+如需在本地运行调试，请在 DevEco Studio 中重新勾选「自动生成签名」，或参考 `build-profile.signed.json5`（该文件已被 `.gitignore` 忽略，不会进入仓库）。
+
+> 注意：本项目为个人健康记录工具，所有数据仅保存在用户设备本地。请在转载、宣传时保持内容健康化，并自行确认应用名称与第三方商标的兼容性。
