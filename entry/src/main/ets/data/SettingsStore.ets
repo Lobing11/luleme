@@ -5,12 +5,14 @@
  */
 import { preferences } from '@kit.ArkData';
 import { common } from '@kit.AbilityKit';
+import { DEFAULT_MATERIAL_LEVEL, MATERIAL_LEVEL_KEY } from '../common/MaterialConfig';
 
 const PREF_NAME: string = 'luleme_settings';
 const KEY_LOCK_ENABLED: string = 'lock_enabled';
 const KEY_PIN_HASH: string = 'pin_hash';
 const KEY_PIN_SALT: string = 'pin_salt';
 const KEY_BIOMETRIC_ENABLED: string = 'biometric_enabled';
+const KEY_MATERIAL_LEVEL: string = MATERIAL_LEVEL_KEY;
 
 export class SettingsStore {
   private static instance: SettingsStore | null = null;
@@ -71,6 +73,16 @@ export class SettingsStore {
 
   async setBiometricEnabled(enabled: boolean): Promise<void> {
     await this.requirePref().put(KEY_BIOMETRIC_ENABLED, enabled);
+    await this.requirePref().flush();
+  }
+
+  /** 沉浸光感材质档位（hdsMaterial.MaterialLevel 数值），默认自适应 */
+  async getMaterialLevel(): Promise<number> {
+    return await this.requirePref().get(KEY_MATERIAL_LEVEL, DEFAULT_MATERIAL_LEVEL) as number;
+  }
+
+  async setMaterialLevel(level: number): Promise<void> {
+    await this.requirePref().put(KEY_MATERIAL_LEVEL, level);
     await this.requirePref().flush();
   }
 

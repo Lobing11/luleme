@@ -29,9 +29,12 @@ export default class EntryAbility extends UIAbility {
     // Main window is created, set main page for this ability
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onWindowStageCreate');
 
-    // 沉浸式：窗口铺满全屏（含状态栏与手势导航条区域），配合各页面 expandSafeArea 使用
+    // 沉浸式：窗口铺满全屏，并隐藏状态栏与手势导航条，真正做到全屏显示
     try {
-      windowStage.getMainWindowSync().setWindowLayoutFullScreen(true);
+      const mainWindow = windowStage.getMainWindowSync();
+      mainWindow.setWindowLayoutFullScreen(true);
+      mainWindow.setSpecificSystemBarEnabled('status', false);
+      mainWindow.setSpecificSystemBarEnabled('navigation', false);
     } catch (err) {
       hilog.error(DOMAIN, 'testTag', 'Failed to set fullscreen. Cause: %{public}s', JSON.stringify(err));
     }
