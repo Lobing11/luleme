@@ -8,6 +8,7 @@ import { RecordRepository } from '../data/RecordRepository';
 import { Record } from '../model/RecordModel';
 import { MOODS, DEFAULT_MOOD, MoodOption } from '../model/RecordModel';
 import { RecordEditParam } from '../common/Constants';
+import { CARD_RADIUS, PAGE_PADDING } from '../common/DesignTokens';
 
 const DATE_PICKER_START: number = 2015;
 const DATE_PICKER_END: number = 2035;
@@ -106,8 +107,7 @@ export struct RecordEdit {
   }
 
   @Builder
-  moodRow() {
-    Row({ space: 8 }) {
+  moodRow() {    Row({ space: 8 }) {
       ForEach(MOODS, (m: MoodOption, idx: number) => {
         Column({ space: 2 }) {
           Text(m.emoji)
@@ -142,18 +142,14 @@ export struct RecordEdit {
         Column({ space: 16 }) {
           // 日期 / 时间
           Column({ space: 0 }) {
-            this.settingRow('日期', this.dateLabel(), () => {
-              this.pickDate();
-            })
+            this.dateRow()
             Divider()
               .color($r('app.color.color_border'))
-            this.settingRow('时间', this.timeLabel(), () => {
-              this.pickTime();
-            })
+            this.timeRow()
           }
           .width('100%')
-          .padding(16)
-          .borderRadius(16)
+          .padding(PAGE_PADDING)
+          .borderRadius(CARD_RADIUS)
           .backgroundColor($r('app.color.color_card'))
 
           // 心情
@@ -165,8 +161,8 @@ export struct RecordEdit {
             this.moodRow()
           }
           .width('100%')
-          .padding(16)
-          .borderRadius(16)
+          .padding(PAGE_PADDING)
+          .borderRadius(CARD_RADIUS)
           .backgroundColor($r('app.color.color_card'))
 
           // 备注
@@ -185,8 +181,8 @@ export struct RecordEdit {
               })
           }
           .width('100%')
-          .padding(16)
-          .borderRadius(16)
+          .padding(PAGE_PADDING)
+          .borderRadius(CARD_RADIUS)
           .backgroundColor($r('app.color.color_card'))
 
           Button(this.editing ? '保存修改' : '记一笔')
@@ -201,9 +197,13 @@ export struct RecordEdit {
             })
         }
         .width('100%')
-        .padding(16)
+        .padding(PAGE_PADDING)
       }
       .width('100%')
+      // 内容不足一屏时 Scroll 默认垂直居中（页面顶部会出现大片空白），强制顶部对齐
+      .align(Alignment.Top)
+      .scrollBar(BarState.Off)
+      .edgeEffect(EdgeEffect.Spring)
       .height('100%')
       .backgroundColor($r('app.color.color_bg'))
     }
@@ -217,14 +217,22 @@ export struct RecordEdit {
     })
   }
 
+  /**
+   * 日期行。
+   *
+   * 这里刻意**不把日期字符串当参数传给 @Builder**：@Builder 的入参是按值传递的，
+   * `settingRow(label, this.dateLabel(), …)` 会把第一次构建时算出的字符串固化在子树里，
+   * 之后 `dateMs` 变成记录的真实时间也不会重绘 —— 表现为「编辑 22 号的记录，日期栏却显示今天」。
+   * 改为零参 @Builder，内部直接读 @State，构建出的 Text 才能跟着状态更新。
+   */
   @Builder
-  settingRow(label: string, value: string, action: () => void) {
+  dateRow() {
     Row() {
-      Text(label)
+      Text('日期')
         .fontSize(15)
         .fontColor($r('app.color.color_text_primary'))
       Blank()
-      Text(value)
+      Text(this.dateLabel())
         .fontSize(15)
         .fontColor($r('app.color.color_primary'))
       Text('›')
@@ -234,9 +242,51 @@ export struct RecordEdit {
     }
     .width('100%')
     .height(44)
-    .onClick(() => {
-      action();
+    .borderRadius(0)
+    .stateStyles({
+      pressed: {
+        .backgroundColor($r('app.color.color_press'))
+      },
+      normal: {
+        .backgroundColor(Color.Transparent)
+      }
     })
+    .onClick(() => {
+      this.pickDate();
+    })
+    .accessibilityText('日期')
+  }
+
+  @Builder
+  timeRow() {
+    Row() {
+      Text('时间')
+        .fontSize(15)
+        .fontColor($r('app.color.color_text_primary'))
+      Blank()
+      Text(this.timeLabel())
+        .fontSize(15)
+        .fontColor($r('app.color.color_primary'))
+      Text('›')
+        .fontSize(16)
+        .fontColor($r('app.color.color_text_secondary'))
+        .margin({ left: 6 })
+    }
+    .width('100%')
+    .height(44)
+    .borderRadius(0)
+    .stateStyles({
+      pressed: {
+        .backgroundColor($r('app.color.color_press'))
+      },
+      normal: {
+        .backgroundColor(Color.Transparent)
+      }
+    })
+    .onClick(() => {
+      this.pickTime();
+    })
+    .accessibilityText('时间')
   }
 
   private dateLabel(): string {

@@ -1,21 +1,35 @@
-/**
- * 鹿了么 - 近 N 月趋势柱状图（Canvas 自绘）
- */
 import { MonthCount } from '../logic/StatsCalculator';
+import { common } from '@kit.AbilityKit';
 
 @Component
 export struct TrendChart {
-  /** 按月统计数据（升序） */
   @Prop @Watch('onDataChange') data: MonthCount[] = [];
 
   private settings: RenderingContextSettings = new RenderingContextSettings(true);
   private context: CanvasRenderingContext2D = new CanvasRenderingContext2D(this.settings);
   private ready: boolean = false;
+  private barColor: string = '#FF5E7E';
+  private labelColor: string = '#8A8A8E';
+  private colorsLoaded: boolean = false;
 
   onDataChange(): void {
     if (this.ready) {
+      this.loadColors();
       this.draw();
     }
+  }
+
+  private loadColors(): void {
+    if (this.colorsLoaded) {
+      return;
+    }
+    const ctx = this.getUIContext().getHostContext() as common.UIAbilityContext;
+    const rm = ctx.resourceManager;
+    const barRaw = rm.getColorSync($r('app.color.color_primary').id);
+    const labelRaw = rm.getColorSync($r('app.color.color_text_secondary').id);
+    this.barColor = '#' + barRaw.toString(16).padStart(8, '0').slice(-6);
+    this.labelColor = '#' + labelRaw.toString(16).padStart(8, '0').slice(-6);
+    this.colorsLoaded = true;
   }
 
   private draw(): void {
@@ -52,9 +66,9 @@ export struct TrendChart {
       const barH = Math.max(2, (this.data[i].count / max) * plotH);
       const x = cx - barW / 2;
       const y = padT + plotH - barH;
-      ctx.fillStyle = '#FF5E7E';
+      ctx.fillStyle = this.barColor;
       ctx.fillRect(x, y, barW, barH);
-      ctx.fillStyle = '#8A8A8E';
+      ctx.fillStyle = this.labelColor;
       ctx.font = '10vp sans-serif';
       ctx.textAlign = 'center';
       ctx.fillText(this.data[i].count.toString(), cx, y - 4);
@@ -68,6 +82,7 @@ export struct TrendChart {
       .height(180)
       .onReady(() => {
         this.ready = true;
+        this.loadColors();
         this.draw();
       })
   }

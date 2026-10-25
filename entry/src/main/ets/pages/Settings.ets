@@ -1,18 +1,18 @@
-/**
- * 鹿了么 - 设置页
- *
- * 隐私锁：PIN 设置 / 修改、生物识别开关、关闭需验证当前 PIN
- * 数据：JSON 导出 / 导入（导入会替换现有数据）、清空全部记录
- * 关于：版本与隐私说明
- */
 import { picker, fileIo } from '@kit.CoreFileKit';
-import { common } from '@kit.AbilityKit';
+import { common, bundleManager } from '@kit.AbilityKit';
 import { util } from '@kit.ArkTS';
+import { hdsMaterial } from '@kit.UIDesignKit';
 import { SettingsStore } from '../data/SettingsStore';
 import { RecordRepository } from '../data/RecordRepository';
 import { Record, parseRecord } from '../model/RecordModel';
 import { hashPin, verifyPin, randomSalt, getBiometricStatus } from '../logic/SecurityUtil';
-import { loadSafeAreaInsets, SafeAreaInsets } from '../common/SafeAreaUtil';
+import {
+  MaterialLevelOption,
+  MATERIAL_LEVEL_OPTIONS,
+  sanitizeMaterialLevel,
+  supportsImmersiveMaterial
+} from '../common/MaterialConfig';
+import { CARD_PADDING, CARD_RADIUS, DIVIDER_INSET, PAGE_BOTTOM_PADDING, PAGE_PADDING, ROW_HEIGHT } from '../common/DesignTokens';
 
 interface BackupPayload {
   app: string;
@@ -21,9 +21,19 @@ interface BackupPayload {
   records: Record[];
 }
 
+/** 读取应用自身 versionName，失败时返回空串（界面不显示版本号而不是显示错的） */
+function readVersionLabel(): string {
+  try {
+    const info = bundleManager.getBundleInfoForSelfSync(bundleManager.BundleFlag.GET_BUNDLE_INFO_DEFAULT);
+    return info.versionName.length > 0 ? `v${info.versionName}` : '';
+  } catch (err) {
+    return '';
+  }
+}
+
 @Component
 export struct SettingsPage {
-  @State insets: SafeAreaInsets = { top: 24, bottom: 16 };
+  @State materialLevel: hdsMaterial.MaterialLevel = hdsMaterial.MaterialLevel.ADAPTIVE;
   @State lockEnabled: boolean = false;
   @State hasPin: boolean = false;
   @State bioEnabled: boolean = false;
@@ -35,18 +45,17 @@ export struct SettingsPage {
   @State showPinDisable: boolean = false;
   @State disablePinInput: string = '';
   @State busy: boolean = false;
+  /** 从 bundle 读取的真实版本号（避免界面里再手写一份 versionName） */
+  @State appVersion: string = '';
 
   aboutToAppear(): void {
+    this.appVersion = readVersionLabel();
     this.load();
-    this.loadInsets();
-  }
-
-  private async loadInsets(): Promise<void> {
-    this.insets = await loadSafeAreaInsets(this.getUIContext());
   }
 
   private async load(): Promise<void> {
     const store = SettingsStore.getInstance();
+    this.materialLevel = sanitizeMaterialLevel(await store.getMaterialLevel());
     this.lockEnabled = await store.isLockEnabled();
     this.hasPin = await store.hasPin();
     this.bioEnabled = await store.isBiometricEnabled();
@@ -135,6 +144,22 @@ export struct SettingsPage {
       return '需先录入指纹/人脸';
     }
     return '指纹 / 人脸';
+  }
+
+  private async selectMaterial(level: hdsMaterial.MaterialLevel): Promise<void> {
+    if (this.materialLevel === level) {
+      return;
+    }
+    this.materialLevel = level;
+    await SettingsStore.getInstance().setMaterialLevel(level);
+    this.getUIContext().getPromptAction().showToast({ message: '沉浸光感档位已切换' });
+  }
+
+  private materialDesc(): string {
+    if (!supportsImmersiveMaterial()) {
+      return '本机不支持沉浸光感';
+    }
+    return '根据设备性能自动调整视觉效果';
   }
 
   private async exportBackup(): Promise<void> {
@@ -279,24 +304,51 @@ export struct SettingsPage {
       .margin({ top: 8, bottom: 4 })
   }
 
+  /**
+   * 应用锁行。
+   *
+   * 副标题依赖 `hasPin`（用户在弹出的 PIN 面板里设置/取消后会变），
+   * 因此不能作为参数传给 @Builder —— @Builder 入参按值传递，会把首次构建时的
+   * 文案固化下来，就会出现「刚设完 PIN，行里还写着未设置 PIN」。这里直接读 @State。
+   */
   @Builder
-  settingRow(title: string, desc: string) {
+  lockSettingRow() {
     Row() {
       Column({ space: 2 }) {
-        Text(title)
+        Text('应用锁')
           .fontSize(15)
           .fontColor($r('app.color.color_text_primary'))
-        if (desc.length > 0) {
-          Text(desc)
-            .fontSize(12)
-            .fontColor($r('app.color.color_text_secondary'))
-        }
+        Text(this.hasPin ? '启动时需输入 PIN' : '未设置 PIN')
+          .fontSize(12)
+          .fontColor($r('app.color.color_text_secondary'))
       }
       .alignItems(HorizontalAlign.Start)
       .layoutWeight(1)
     }
-    .width('100%')
-    .height(52)
+    .layoutWeight(1)
+  }
+
+  /** 生物识别行：副标题来自设备能力 + 锁状态，同样不能按值传进 @Builder */
+  @Builder
+  bioSettingRow() {
+    Row() {
+      Column({ space: 2 }) {
+        Text('生物识别解锁')
+          .fontSize(15)
+          .fontColor($r('app.color.color_text_primary'))
+        Text(this.bioDesc())
+          .fontSize(12)
+          .fontColor($r('app.color.color_text_secondary'))
+      }
+      .alignItems(HorizontalAlign.Start)
+      .layoutWeight(1)
+    }
+    .layoutWeight(1)
+  }
+
+  /** 生物识别开关可用性：必须先开应用锁、已设 PIN，且设备支持并已录入 */
+  private bioToggleEnabled(): boolean {
+    return this.lockEnabled && this.hasPin && this.bioAvailable;
   }
 
   @Builder
@@ -337,8 +389,8 @@ export struct SettingsPage {
         })
     }
     .width('100%')
-    .padding(16)
-    .borderRadius(16)
+    .padding(CARD_PADDING)
+    .borderRadius(CARD_RADIUS)
     .backgroundColor($r('app.color.color_card'))
   }
 
@@ -371,67 +423,50 @@ export struct SettingsPage {
         })
     }
     .width('100%')
-    .padding(16)
-    .borderRadius(16)
+    .padding(CARD_PADDING)
+    .borderRadius(CARD_RADIUS)
     .backgroundColor($r('app.color.color_card'))
   }
 
   build() {
     Column() {
-      // 沉浸式头部
-      Column() {
-        Row() {
-          Text('设置')
-            .fontSize(20)
-            .fontWeight(FontWeight.Bold)
-            .fontColor($r('app.color.color_text_primary'))
-          Blank()
-        }
-        .width('100%')
-        .height(48)
-      }
-      .width('100%')
-      .padding({ top: this.insets.top })
-      .backgroundColor($r('app.color.color_header_bg'))
-      .backgroundEffect({
-        radius: 20,
-        saturation: 1.5,
-        brightness: 1.0
-      })
-      .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP])
-
       Scroll() {
         Column({ space: 10 }) {
           this.sectionTitle('隐私锁')
           Column({ space: 0 }) {
             Row() {
-              this.settingRow('应用锁', this.hasPin ? '启动时需输入 PIN' : '未设置 PIN')
+              this.lockSettingRow()
               Toggle({ type: ToggleType.Switch, isOn: this.lockEnabled })
                 .selectedColor($r('app.color.color_primary'))
                 .onChange((v: boolean) => {
                   this.onToggleLock(v);
                 })
+                .accessibilityText('应用锁开关')
             }
             .width('100%')
-            .padding({ left: 16, right: 16 })
-            .height(52)
+            .padding({ left: CARD_PADDING, right: CARD_PADDING })
+            .height(ROW_HEIGHT)
             Divider()
               .color($r('app.color.color_border'))
+              .margin({ left: DIVIDER_INSET, right: DIVIDER_INSET })
             Row() {
-              this.settingRow('生物识别解锁', this.bioDesc())
+              this.bioSettingRow()
               Toggle({ type: ToggleType.Switch, isOn: this.bioEnabled })
                 .selectedColor($r('app.color.color_primary'))
-                .enabled(this.lockEnabled && this.hasPin && this.bioAvailable)
+                .enabled(this.bioToggleEnabled())
                 .onChange((v: boolean) => {
                   this.onToggleBio(v);
                 })
+                .accessibilityText('生物识别解锁开关')
             }
             .width('100%')
-            .padding({ left: 16, right: 16 })
-            .height(52)
+            .padding({ left: CARD_PADDING, right: CARD_PADDING })
+            .height(ROW_HEIGHT)
+            // 不可用时整行置灰：避免"看起来能点、点了没反应"
+            .opacity(this.bioToggleEnabled() ? 1 : 0.4)
           }
           .width('100%')
-          .borderRadius(16)
+          .borderRadius(CARD_RADIUS)
           .backgroundColor($r('app.color.color_card'))
 
           if (this.showPinSetup) {
@@ -441,6 +476,56 @@ export struct SettingsPage {
             this.pinDisablePanel()
           }
 
+          this.sectionTitle('沉浸光感')
+          Column({ space: 12 }) {
+            Column({ space: 2 }) {
+              Text('材质档位')
+                .fontSize(15)
+                .fontColor($r('app.color.color_text_primary'))
+              Text(this.materialDesc())
+                .fontSize(12)
+                .fontColor($r('app.color.color_text_secondary'))
+            }
+            .alignItems(HorizontalAlign.Start)
+            .width('100%')
+
+            // 四档等宽分段控件：不再把当前值单独贴在行尾（旧版会被屏幕右缘切掉）
+            Row({ space: 8 }) {
+              ForEach(MATERIAL_LEVEL_OPTIONS, (opt: MaterialLevelOption) => {
+                Row() {
+                  Text(opt.label)
+                    .fontSize(13)
+                    .fontColor(this.materialLevel === opt.key ?
+                      $r('app.color.color_white') : $r('app.color.color_text_secondary'))
+                }
+                .layoutWeight(1)
+                .height(34)
+                .justifyContent(FlexAlign.Center)
+                .borderRadius(17)
+                .backgroundColor(this.materialLevel === opt.key ?
+                  $r('app.color.color_primary') : $r('app.color.color_bg'))
+                .stateStyles({
+                  pressed: {
+                    .backgroundColor($r('app.color.color_press'))
+                  },
+                  normal: {
+                    .backgroundColor(this.materialLevel === opt.key ?
+                      $r('app.color.color_primary') : $r('app.color.color_bg'))
+                  }
+                })
+                .onClick(() => {
+                  this.selectMaterial(opt.key);
+                })
+                .accessibilityText(opt.label)
+              }, (opt: MaterialLevelOption) => opt.key.toString())
+            }
+            .width('100%')
+          }
+          .width('100%')
+          .padding(CARD_PADDING)
+          .borderRadius(CARD_RADIUS)
+          .backgroundColor($r('app.color.color_card'))
+
           this.sectionTitle('数据')
           Column({ space: 0 }) {
             this.actionRow('导出备份', '保存为 JSON 文件', () => {
@@ -448,38 +533,41 @@ export struct SettingsPage {
             })
             Divider()
               .color($r('app.color.color_border'))
+              .margin({ left: DIVIDER_INSET, right: DIVIDER_INSET })
             this.actionRow('导入备份', '替换当前数据', () => {
               this.importBackup();
             })
             Divider()
               .color($r('app.color.color_border'))
+              .margin({ left: DIVIDER_INSET, right: DIVIDER_INSET })
             this.actionRow('清空所有记录', '删除全部数据', () => {
               this.clearAll();
             }, true)
           }
           .width('100%')
-          .borderRadius(16)
+          .borderRadius(CARD_RADIUS)
           .backgroundColor($r('app.color.color_card'))
 
           this.sectionTitle('关于')
           Column({ space: 0 }) {
-            this.aboutRow('版本', 'v1.0.0')
+            this.versionRow()
             Divider()
               .color($r('app.color.color_border'))
+              .margin({ left: DIVIDER_INSET, right: DIVIDER_INSET })
             this.aboutRow('隐私说明', '')
             Text('所有记录仅保存在本机，应用不联网、不上传任何数据。')
               .fontSize(13)
               .fontColor($r('app.color.color_text_secondary'))
               .width('100%')
               .lineHeight(20)
-              .padding({ left: 16, right: 16, bottom: 16 })
+              .padding({ left: 16, right: 16, top: 12, bottom: 16 })
           }
           .width('100%')
-          .borderRadius(16)
+          .borderRadius(CARD_RADIUS)
           .backgroundColor($r('app.color.color_card'))
         }
         .width('100%')
-        .padding({ left: 16, right: 16, top: 16, bottom: 64 })
+        .padding({ left: PAGE_PADDING, right: PAGE_PADDING, top: PAGE_PADDING, bottom: PAGE_BOTTOM_PADDING })
         .alignItems(HorizontalAlign.Start)
       }
       .width('100%')
@@ -488,6 +576,28 @@ export struct SettingsPage {
     .width('100%')
     .height('100%')
     .backgroundColor($r('app.color.color_bg'))
+  }
+
+  /**
+   * 版本行。零参 @Builder 内直接读 @State —— 若按 `aboutRow('版本', this.appVersion)` 传参，
+   * 字符串会被按值固化在子树里，版本号一改就显示成旧值。
+   */
+  @Builder
+  versionRow() {
+    Row() {
+      Text('版本')
+        .fontSize(15)
+        .fontColor($r('app.color.color_text_primary'))
+      Blank()
+      if (this.appVersion.length > 0) {
+        Text(this.appVersion)
+          .fontSize(15)
+          .fontColor($r('app.color.color_text_secondary'))
+      }
+    }
+    .width('100%')
+    .height(ROW_HEIGHT)
+    .padding({ left: CARD_PADDING, right: CARD_PADDING })
   }
 
   @Builder
@@ -504,8 +614,8 @@ export struct SettingsPage {
       }
     }
     .width('100%')
-    .height(52)
-    .padding({ left: 16, right: 16 })
+    .height(ROW_HEIGHT)
+    .padding({ left: CARD_PADDING, right: CARD_PADDING })
   }
 
   @Builder
@@ -528,8 +638,17 @@ export struct SettingsPage {
         .fontColor($r('app.color.color_text_secondary'))
     }
     .width('100%')
-    .height(52)
-    .padding({ left: 16, right: 16 })
+    .height(ROW_HEIGHT)
+    .padding({ left: CARD_PADDING, right: CARD_PADDING })
+    .borderRadius(0)
+    .stateStyles({
+      pressed: {
+        .backgroundColor($r('app.color.color_press'))
+      },
+      normal: {
+        .backgroundColor(Color.Transparent)
+      }
+    })
     .onClick(() => {
       action();
     })

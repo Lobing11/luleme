@@ -1,12 +1,8 @@
-/**
- * 鹿了么 - 统计页（底部标签栏内的标签页）
- *
- * 展示：本月次数 / 当前连续 / 总次数 / 最长间隔 / 平均间隔 / 距上次，
- * 以及近 6 个月趋势柱状图。
- */
 import { RecordRepository } from '../data/RecordRepository';
 import { Record } from '../model/RecordModel';
 import { TrendChart } from '../components/TrendChart';
+import { EmptyState } from '../components/EmptyState';
+import { StatTile } from '../components/StatTile';
 import {
   MonthCount,
   currentStreak,
@@ -17,13 +13,11 @@ import {
   daysSinceLast,
   monthCounts
 } from '../logic/StatsCalculator';
-import { loadSafeAreaInsets, SafeAreaInsets } from '../common/SafeAreaUtil';
+import { CARD_PADDING, CARD_RADIUS, PAGE_BOTTOM_PADDING, PAGE_PADDING } from '../common/DesignTokens';
 
 @Component
 export struct StatsPage {
-  /** 父页面切换到此标签时递增，触发重新加载 */
   @Prop @Watch('onTick') refreshTick: number = 0;
-  @State insets: SafeAreaInsets = { top: 24, bottom: 16 };
 
   @State records: Record[] = [];
   @State monthTotal: number = 0;
@@ -37,11 +31,6 @@ export struct StatsPage {
 
   aboutToAppear(): void {
     this.load();
-    this.loadInsets();
-  }
-
-  private async loadInsets(): Promise<void> {
-    this.insets = await loadSafeAreaInsets(this.getUIContext());
   }
 
   onTick(): void {
@@ -66,71 +55,24 @@ export struct StatsPage {
   }
 
   @Builder
-  statCard(title: string, value: string, unit: string) {
-    Column({ space: 4 }) {
-      Text(title)
-        .fontSize(12)
-        .fontColor($r('app.color.color_text_secondary'))
-      Row({ space: 2 }) {
-        Text(value)
-          .fontSize(26)
-          .fontWeight(FontWeight.Bold)
-          .fontColor($r('app.color.color_text_primary'))
-        if (unit.length > 0) {
-          Text(unit)
-            .fontSize(12)
-            .fontColor($r('app.color.color_text_secondary'))
-        }
-      }
-    }
-    .width('100%')
-    .height(88)
-    .justifyContent(FlexAlign.Center)
-    .borderRadius(16)
-    .backgroundColor($r('app.color.color_card'))
-  }
-
-  @Builder
   rowCards() {
     Row({ space: 10 }) {
-      this.statCard('本月次数', this.monthTotal.toString(), '次')
-      this.statCard('当前连续', this.streak.toString(), '天')
-      this.statCard('总次数', this.grandTotal.toString(), '次')
+      StatTile({ title: '本月次数', value: this.monthTotal.toString(), unit: '次' })
+      StatTile({ title: '当前连续', value: this.streak.toString(), unit: '天' })
+      StatTile({ title: '总次数', value: this.grandTotal.toString(), unit: '次' })
     }
     .width('100%')
   }
 
   build() {
     Column() {
-      // 沉浸式头部
-      Column() {
-        Row() {
-          Text('统计')
-            .fontSize(20)
-            .fontWeight(FontWeight.Bold)
-            .fontColor($r('app.color.color_text_primary'))
-          Blank()
-        }
-        .width('100%')
-        .height(48)
-      }
-      .width('100%')
-      .padding({ top: this.insets.top })
-      .backgroundColor($r('app.color.color_header_bg'))
-      .backgroundEffect({
-        radius: 20,
-        saturation: 1.5,
-        brightness: 1.0
-      })
-      .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP])
-
       Scroll() {
         Column({ space: 12 }) {
           this.rowCards()
           Row({ space: 10 }) {
-            this.statCard('最长间隔', this.maxGap.toString(), '天')
-            this.statCard('平均间隔', this.avgGap.toString(), '天')
-            this.statCard('距上次', this.sinceLastLabel(), '')
+            StatTile({ title: '最长间隔', value: this.maxGap.toString(), unit: '天' })
+            StatTile({ title: '平均间隔', value: this.avgGap.toString(), unit: '天' })
+            StatTile({ title: '距上次', value: this.sinceLastValue(), unit: this.sinceLastUnit() })
           }
           .width('100%')
 
@@ -141,41 +83,45 @@ export struct StatsPage {
               .fontColor($r('app.color.color_text_primary'))
               .width('100%')
             if (this.grandTotal === 0) {
-              Column() {
-                Text('还没有记录，先去记一笔吧')
-                  .fontSize(13)
-                  .fontColor($r('app.color.color_text_secondary'))
-              }
-              .width('100%')
-              .height(180)
-              .justifyContent(FlexAlign.Center)
+              EmptyState({ title: '暂无数据', desc: '还没有记录，先去记一笔吧' })
             } else {
               TrendChart({ data: this.trend })
             }
           }
           .width('100%')
-          .padding(16)
-          .borderRadius(16)
+          .padding(CARD_PADDING)
+          .borderRadius(CARD_RADIUS)
           .backgroundColor($r('app.color.color_card'))
         }
         .width('100%')
-        .padding({ left: 16, right: 16, top: 16, bottom: 64 })
+        .padding({ left: PAGE_PADDING, right: PAGE_PADDING, top: PAGE_PADDING, bottom: PAGE_BOTTOM_PADDING })
       }
       .width('100%')
       .layoutWeight(1)
+      // 内容不足一屏时默认居中会导致上下大片空白，强制顶部对齐
+      .align(Alignment.Top)
+      .scrollBar(BarState.Off)
+      .edgeEffect(EdgeEffect.Spring)
     }
     .width('100%')
     .height('100%')
     .backgroundColor($r('app.color.color_bg'))
   }
 
-  private sinceLastLabel(): string {
+  private sinceLastValue(): string {
     if (this.sinceLast < 0) {
       return '—';
     }
     if (this.sinceLast === 0) {
-      return '今天';
+      return '0';
     }
-    return this.sinceLast + '天';
+    return this.sinceLast.toString();
+  }
+
+  private sinceLastUnit(): string {
+    if (this.sinceLast < 0) {
+      return '';
+    }
+    return '天';
   }
 }

@@ -58,7 +58,7 @@
     },
     {
       "name": "heat_4",
-      "value": "#FF5E7E"
+      "value": "#E84A6C"
     },
     {
       "name": "color_white",
@@ -67,6 +67,10 @@
     {
       "name": "color_danger",
       "value": "#E5484D"
+    },
+    {
+      "name": "color_press",
+      "value": "#14FF5E7E"
     }
   ]
 }

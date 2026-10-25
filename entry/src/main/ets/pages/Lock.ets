@@ -98,6 +98,14 @@ export struct LockPage {
         .textAlign(TextAlign.Center)
         .borderRadius(36)
         .backgroundColor($r('app.color.color_card'))
+        .stateStyles({
+          pressed: {
+            .backgroundColor($r('app.color.color_primary_soft'))
+          },
+          normal: {
+            .backgroundColor($r('app.color.color_card'))
+          }
+        })
         .onClick(() => {
           this.onKey(key);
         })

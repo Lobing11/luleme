@@ -1,10 +1,3 @@
-/**
- * 鹿了么 - 首页
- *
- * 底部标签栏（日历 / 统计 / 设置）+ 沉浸式光感：
- * 顶部头部扩展到状态栏（毛玻璃），底部标签栏毛玻璃并延伸到手势导航条。
- * 路由：RecordEdit / Lock 通过 Navigation 压栈。
- */
 import { Record } from '../model/RecordModel';
 import { moodEmoji, formatDateTime } from '../model/RecordModel';
 import { RecordRepository } from '../data/RecordRepository';
@@ -14,6 +7,19 @@ import { RecordEdit } from './RecordEdit';
 import { StatsPage } from './Stats';
 import { SettingsPage } from './Settings';
 import { LockPage } from './Lock';
+import { EmptyState } from '../components/EmptyState';
+import { StatTile } from '../components/StatTile';
+import { NavIconButton } from '../components/NavIconButton';
+import {
+  HdsNavigation,
+  HdsTabs,
+  HdsTabsController,
+  hdsMaterial,
+  HdsNavigationTitleBarOptions,
+  HdsTabsFloatingStyle,
+  ScrollEffectType
+} from '@kit.UIDesignKit';
+import { buildSystemMaterialParams, sanitizeMaterialLevel } from '../common/MaterialConfig';
 import {
   ROUTE_RECORD_EDIT,
   ROUTE_LOCK,
@@ -31,16 +37,29 @@ import {
 } from '../logic/StatsCalculator';
 import { shiftMonth } from '../logic/CalendarUtil';
 import { loadSafeAreaInsets, SafeAreaInsets } from '../common/SafeAreaUtil';
+import {
+  CARD_GAP,
+  CARD_PADDING,
+  CARD_RADIUS,
+  PAGE_BOTTOM_PADDING,
+  PAGE_PADDING
+} from '../common/DesignTokens';
 
 @Entry
 @Component
 struct Index {
   pathStack: NavPathStack = new NavPathStack();
-  private tabsController: TabsController = new TabsController();
+  private tabsController: HdsTabsController = new HdsTabsController();
 
   @State currentTab: number = 0;
+  /** 页面内容切换时的淡入/微位移（由 selectTab 驱动，掩盖新页面首帧构建的开销） */
+  @State contentAlpha: number = 1;
+  @State contentOffsetY: number = 0;
+  /** 上一个 Tab 切换时间戳，用于丢弃连点产生的重复切换 */
+  private lastTabSwitchMs: number = 0;
   @State statsTick: number = 0;
   @State insets: SafeAreaInsets = { top: 24, bottom: 16 };
+  @State materialLevel: hdsMaterial.MaterialLevel = hdsMaterial.MaterialLevel.ADAPTIVE;
 
   @State records: Record[] = [];
   @State viewYear: number = 2025;
@@ -55,12 +74,26 @@ struct Index {
   @State sheetTitle: string = '';
   @State sheetRecords: Record[] = [];
 
+  /**
+   * 记录变更回调：任何页面（新增 / 编辑 / 删除 / 清空 / 导入）写库后都会广播，
+   * 首页在这里重读数据。之前没有这条通道，弹栈回首页时 onPageShow 不会触发，
+   * 日历热力图和今日/本月/连续三个数字就永远停在进入详情前的那一版。
+   */
+  private onRecordsChanged: () => void = () => {
+    this.refresh();
+  };
+
   aboutToAppear(): void {
     const now = new Date();
     this.viewYear = now.getFullYear();
     this.viewMonth = now.getMonth();
+    RecordRepository.getInstance().subscribe(this.onRecordsChanged);
     this.refresh();
     this.loadInsets();
+  }
+
+  aboutToDisappear(): void {
+    RecordRepository.getInstance().unsubscribe(this.onRecordsChanged);
   }
 
   private async loadInsets(): Promise<void> {
@@ -70,6 +103,12 @@ struct Index {
   onPageShow(): void {
     this.refresh();
     this.checkLock();
+    this.loadMaterialLevel();
+  }
+
+  private async loadMaterialLevel(): Promise<void> {
+    const stored = await SettingsStore.getInstance().getMaterialLevel();
+    this.materialLevel = sanitizeMaterialLevel(stored);
   }
 
   private async checkLock(): Promise<void> {
@@ -88,8 +127,13 @@ struct Index {
       const all = await RecordRepository.getInstance().getAll();
       this.records = all;
       this.recomputeStats();
+      // 数据变了才通知统计页重算；切换 Tab 本身不再触发任何数据读取
+      this.statsTick++;
     } catch (err) {
-      // 数据库未初始化等异常，静默处理
+      // 读库失败时保留上一版数据，但要把原因留在日志里
+      // （此前这里是空 catch，初始化竞态被静默吞掉，排查时没有任何线索）
+      const e = err as Error;
+      console.error(`[Index] refresh failed: ${e.message}`);
     }
   }
 
@@ -133,6 +177,21 @@ struct Index {
 
   private dayCountsOfView(): Map<number, number> {
     return countByDayOfMonth(this.records, this.viewYear, this.viewMonth);
+  }
+
+  /**
+   * 把「日 → 次数」的 Map 摊平成下标数组（0 号位留空），供 @Prop 传参。
+   * @Prop 对 Map 的深拷贝不可靠，数组能保证换月时网格一定拿到新数据。
+   */
+  private dayCountsArray(): number[] {
+    const counts: number[] = new Array<number>(32).fill(0);
+    const map = this.dayCountsOfView();
+    map.forEach((value: number, key: number) => {
+      if (key >= 1 && key <= 31) {
+        counts[key] = value;
+      }
+    });
+    return counts;
   }
 
   private onDayTap(day: number): void {
@@ -196,64 +255,101 @@ struct Index {
     }
   }
 
-  /** 沉浸式头部：扩展到状态栏 + 毛玻璃光感 */
-  @Builder
-  HeaderBar() {
-    Column() {
-      Row() {
-        Text('鹿了么')
-          .fontSize(20)
-          .fontWeight(FontWeight.Bold)
-          .fontColor($r('app.color.color_text_primary'))
-        Blank()
-        Text('统计')
-          .fontSize(14)
-          .fontColor(this.currentTab === 1 ?
-            $r('app.color.color_primary') : $r('app.color.color_text_secondary'))
-          .padding({ left: 14, right: 8, top: 8, bottom: 8 })
-          .onClick(() => {
-            this.tabsController.changeIndex(1);
-          })
-        Text('设置')
-          .fontSize(14)
-          .fontColor(this.currentTab === 2 ?
-            $r('app.color.color_primary') : $r('app.color.color_text_secondary'))
-          .padding({ left: 14, right: 8, top: 8, bottom: 8 })
-          .onClick(() => {
-            this.tabsController.changeIndex(2);
-          })
-      }
-      .width('100%')
-      .height(54)
+  private currentTitle(): string {
+    if (this.currentTab === 1) {
+      return '统计';
     }
-    .width('100%')
-    .padding({ top: this.insets.top })
-    .backgroundColor($r('app.color.color_header_bg'))
-    // 沉浸式光感：背景光效（模糊半径 + 饱和度 + 亮度），比 backgroundBlurStyle 更通透
-    .backgroundEffect({
-      radius: 20,          // 模糊半径，越大越朦胧
-      saturation: 1.5,     // 饱和度 >1 时透出背景更鲜艳（光感）
-      brightness: 1.0
-    })
-    .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP])
+    if (this.currentTab === 2) {
+      return '设置';
+    }
+    return '鹿了么';
   }
 
-  /** Tabs 自身的透明标签（不可见，仅占位，交互交给悬浮胶囊） */
-  @Builder
-  InvisibleTabCell(idx: number) {
-    Column()
-      .width('100%')
-      .height('100%')
+  /**
+   * 底部 Tab 切换（跟手 + 防连点 + 转场）
+   *
+   * 之前的问题：高亮状态只在 HdsTabs 的 onChange 里更新，而 onChange 是在**切换动画结束后**
+   * 才回调的，所以手指点下去到高亮变色之间有一段空窗，主观上就是"点了没反应"。
+   * 现在的顺序：
+   *   1) 同步改 currentTab —— 同一帧内高亮/标题就变（跟手）；
+   *   2) 新内容以略低的透明度和 6vp 位移起帧；
+   *   3) 交给 HdsTabs 做内容翻转，下一帧再把透明度/位移动画回正常值（淡入 + 轻微上滑）。
+   */
+  private selectTab(idx: number): void {
+    if (idx === this.currentTab) {
+      return;
+    }
+    const now = Date.now();
+    if (now - this.lastTabSwitchMs < 120) {
+      return; // 连点冷却：丢弃 120ms 内的重复点击，避免事件排队
+    }
+    this.lastTabSwitchMs = now;
+
+    this.currentTab = idx;
+    this.contentAlpha = 0.86;
+    this.contentOffsetY = 6;
+    this.tabsController.changeIndex(idx);
+    if (idx === 0) {
+      // 回到日历时补一次读库：其他 Tab 里清空/导入数据后，日历页也能立刻对齐
+      this.refresh();
+    }
+
+    setTimeout(() => {
+      this.getUIContext().animateTo({
+        duration: 220,
+        curve: Curve.FastOutSlowIn
+      }, () => {
+        this.contentAlpha = 1;
+        this.contentOffsetY = 0;
+      });
+    }, 16);
   }
 
-  /** 悬浮胶囊里的标签项 */
+  /** 标题栏沉浸光感（HdsNavigation.titleBar.style） */
+  private titleBarOptions(): HdsNavigationTitleBarOptions {
+    return {
+      style: {
+        scrollEffectOpts: {
+          enableScrollEffect: true,
+          scrollEffectType: ScrollEffectType.GRADIENT_BLUR
+        },
+        systemMaterialEffect: buildSystemMaterialParams(this.materialLevel)
+      },
+      content: {
+        title: {
+          mainTitle: this.currentTitle()
+        }
+      },
+      enableComponentSafeArea: true
+    };
+  }
+
+  /**
+   * 底部悬浮导航沉浸光感（HdsTabs.barFloatingStyle）
+   *
+   * 注意：这里**不再配置 miniBar**。配置 miniBar 后 HdsTabs 会把「胶囊栏 + 迷你栏」
+   * 并排布局，胶囊栏被压缩、迷你栏被推到屏幕右缘之外，导致：
+   *   1) 右下角出现第二个齿轮「设置」入口（与胶囊栏重复）；
+   *   2) 迷你栏标题被挤压成竖排文字并溢出屏幕（旧版 UI 的显示异常）。
+   * 该应用不需要「滚动收起为迷你栏」的行为，故整体移除。
+   */
+  private barFloatingStyle(): HdsTabsFloatingStyle {
+    return {
+      barSideMargin: PAGE_PADDING,
+      barBottomMargin: 8 + this.insets.bottom,
+      systemMaterialEffect: buildSystemMaterialParams(this.materialLevel)
+    };
+  }
+
   @Builder
-  capsuleItem(icon: string, label: string, idx: number) {
+  capsuleItem(icon: Resource, label: string, idx: number) {
     Column({ space: 2 }) {
-      Text(icon)
+      SymbolGlyph(icon)
         .fontSize(20)
+        .fontColor([this.currentTab === idx ?
+          $r('app.color.color_primary') : $r('app.color.color_text_secondary')])
       Text(label)
-        .fontSize(10)
+        .fontSize(11)
         .fontColor(this.currentTab === idx ?
           $r('app.color.color_primary') : $r('app.color.color_text_secondary'))
     }
@@ -263,32 +359,19 @@ struct Index {
     .borderRadius(20)
     .backgroundColor(this.currentTab === idx ?
       $r('app.color.color_primary_soft') : Color.Transparent)
-    .onClick(() => {
-      this.tabsController.changeIndex(idx);
-    })
-  }
-
-  @Builder
-  statMini(title: string, value: number, unit: string) {
-    Column({ space: 2 }) {
-      Text(title)
-        .fontSize(12)
-        .fontColor($r('app.color.color_text_secondary'))
-      Row({ space: 2 }) {
-        Text(value.toString())
-          .fontSize(22)
-          .fontWeight(FontWeight.Bold)
-          .fontColor($r('app.color.color_text_primary'))
-        Text(unit)
-          .fontSize(12)
-          .fontColor($r('app.color.color_text_secondary'))
+    .stateStyles({
+      pressed: {
+        .backgroundColor($r('app.color.color_press'))
+      },
+      normal: {
+        .backgroundColor(this.currentTab === idx ?
+          $r('app.color.color_primary_soft') : Color.Transparent)
       }
-    }
-    .layoutWeight(1)
-    .height(72)
-    .justifyContent(FlexAlign.Center)
-    .borderRadius(14)
-    .backgroundColor($r('app.color.color_card'))
+    })
+    .onClick(() => {
+      this.selectTab(idx);
+    })
+    .accessibilityText(label)
   }
 
   @Builder
@@ -312,18 +395,34 @@ struct Index {
       .layoutWeight(1)
       Button('编辑')
         .fontSize(12)
-        .height(30)
+        .height(36)
         .fontColor($r('app.color.color_primary'))
         .backgroundColor($r('app.color.color_primary_soft'))
+        .stateStyles({
+          pressed: {
+            .backgroundColor($r('app.color.color_press'))
+          },
+          normal: {
+            .backgroundColor($r('app.color.color_primary_soft'))
+          }
+        })
         .onClick(() => {
           this.editRecord(r.id);
         })
       Button('删除')
         .fontSize(12)
-        .height(30)
+        .height(36)
         .fontColor($r('app.color.color_danger'))
         .backgroundColor($r('app.color.color_card'))
         .border({ width: 1, color: $r('app.color.color_danger') })
+        .stateStyles({
+          pressed: {
+            .backgroundColor($r('app.color.color_press'))
+          },
+          normal: {
+            .backgroundColor($r('app.color.color_card'))
+          }
+        })
         .onClick(() => {
           this.confirmDelete(r.id);
         })
@@ -342,13 +441,12 @@ struct Index {
       Divider()
         .color($r('app.color.color_border'))
       if (this.sheetRecords.length === 0) {
+        // 空态在内容区居中，主按钮始终贴在面板底部
         Column() {
-          Text('这一天没有记录')
-            .fontSize(13)
-            .fontColor($r('app.color.color_text_secondary'))
+          EmptyState({ title: '暂无记录', desc: '点击下方按钮添加一条记录' })
         }
-        .width('100%')
         .layoutWeight(1)
+        .width('100%')
         .justifyContent(FlexAlign.Center)
       } else {
         List({ space: 4 }) {
@@ -375,194 +473,189 @@ struct Index {
     .width('100%')
     .height('100%')
     .padding(16)
-    .backgroundColor($r('app.color.color_bg'))
+    .backgroundColor($r('app.color.color_card'))
   }
 
   build() {
-    Navigation(this.pathStack) {
+    HdsNavigation(this.pathStack) {
       Stack({ alignContent: Alignment.Bottom }) {
-      Tabs({ barPosition: BarPosition.End, index: this.currentTab, controller: this.tabsController }) {
-        // 标签 1：日历
+      HdsTabs({ index: this.currentTab, controller: this.tabsController }) {
         TabContent() {
           Column() {
-            this.HeaderBar()
+            // 上半部分可滚动：热力图 + 图例 + 迷你统计 + 空态
+            Scroll() {
+              Column({ space: CARD_GAP }) {
+                Column({ space: 8 }) {
+                  Row() {
+                    Text(this.monthLabel())
+                      .fontSize(16)
+                      .fontWeight(FontWeight.Medium)
+                      .fontColor($r('app.color.color_text_primary'))
+                    Blank()
+                    Row({ space: 4 }) {
+                      NavIconButton({
+                        icon: $r('sys.symbol.chevron_left'),
+                        desc: '上个月',
+                        active: true,
+                        onTap: () => {
+                          this.prevMonth();
+                        }
+                      })
+                      NavIconButton({
+                        icon: $r('sys.symbol.chevron_right'),
+                        desc: '下个月',
+                        active: this.canGoNextMonth(),
+                        onTap: () => {
+                          this.nextMonth();
+                        }
+                      })
+                    }
+                  }
+                  .width('100%')
+                  .height(36)
 
-            // 日历卡片
-            Column({ space: 8 }) {
-              Row() {
-                Text(this.monthLabel())
-                  .fontSize(16)
-                  .fontWeight(FontWeight.Medium)
-                  .fontColor($r('app.color.color_text_primary'))
-                Blank()
-                Text('‹')
-                  .fontSize(26)
-                  .fontColor($r('app.color.color_text_secondary'))
-                  .padding({ left: 14, right: 14 })
-                  .onClick(() => {
-                    this.prevMonth();
+                  CalendarHeatmap({
+                    year: this.viewYear,
+                    month: this.viewMonth,
+                    dayCounts: this.dayCountsArray(),
+                    todayDay: this.todayDayOfView(),
+                    onDayTap: (day: number) => {
+                      this.onDayTap(day);
+                    }
                   })
-                Text('›')
-                  .fontSize(26)
-                  .fontColor($r('app.color.color_text_secondary'))
-                  .padding({ left: 14, right: 14 })
-                  .enabled(this.isCurrentMonth())
-                  .opacity(this.isCurrentMonth() ? 1 : 0.3)
-                  .onClick(() => {
-                    this.nextMonth();
-                  })
-              }
-              .width('100%')
 
-              CalendarHeatmap({
-                year: this.viewYear,
-                month: this.viewMonth,
-                dayCounts: this.dayCountsOfView(),
-                todayDay: this.todayDayOfView(),
-                onDayTap: (day: number) => {
-                  this.onDayTap(day);
+                  Row({ space: 6 }) {
+                    Text('少')
+                      .fontSize(12)
+                      .fontColor($r('app.color.color_text_secondary'))
+                    ForEach(HEAT_COLORS, (c: Resource, idx: number) => {
+                      Circle({ width: 10, height: 10 })
+                        .fill(c)
+                    }, (c: Resource, idx: number) => idx.toString())
+                    Text('多')
+                      .fontSize(12)
+                      .fontColor($r('app.color.color_text_secondary'))
+                  }
+                  .width('100%')
+                  .justifyContent(FlexAlign.End)
                 }
-              })
+                .width('100%')
+                .padding(CARD_PADDING)
+                .borderRadius(CARD_RADIUS)
+                .backgroundColor($r('app.color.color_card'))
 
-              Row({ space: 6 }) {
-                Text('少')
-                  .fontSize(11)
-                  .fontColor($r('app.color.color_text_secondary'))
-                ForEach(HEAT_COLORS, (c: Resource, idx: number) => {
-                  Circle({ width: 10, height: 10 })
-                    .fill(c)
-                }, (c: Resource, idx: number) => idx.toString())
-                Text('多')
-                  .fontSize(11)
-                  .fontColor($r('app.color.color_text_secondary'))
+                Row({ space: 10 }) {
+                  StatTile({ title: '今日', value: this.todayTotal.toString(), unit: '次', tileHeight: 72,
+                    valueFontSize: 22 })
+                  StatTile({ title: '本月', value: this.monthTotal.toString(), unit: '次', tileHeight: 72,
+                    valueFontSize: 22 })
+                  StatTile({ title: '连续', value: this.streak.toString(), unit: '天', tileHeight: 72,
+                    valueFontSize: 22 })
+                }
+                .width('100%')
+
+                if (this.grandTotal === 0) {
+                  EmptyState({ title: '还没有记录', desc: '点击下方按钮开始记录，点日历格可查看当天详情' })
+                    .width('100%')
+                }
               }
               .width('100%')
-              .justifyContent(FlexAlign.End)
+              .padding({ top: 12, bottom: 16 })
             }
             .width('100%')
-            .padding(16)
-            .margin({ top: 12, left: 16, right: 16 })
-            .borderRadius(16)
-            .backgroundColor($r('app.color.color_card'))
+            .layoutWeight(1)
+            .align(Alignment.Top)
+            .scrollBar(BarState.Off)
+            .edgeEffect(EdgeEffect.Spring)
 
-            // 当月概览
-            Row({ space: 10 }) {
-              this.statMini('今日', this.todayTotal, '次')
-              this.statMini('本月', this.monthTotal, '次')
-              this.statMini('连续', this.streak, '天')
-            }
-            .width('100%')
-            .margin({ top: 12, left: 16, right: 16 })
-
-            if (this.grandTotal === 0) {
-              Column({ space: 6 }) {
-                Text('还没有记录')
-                  .fontSize(15)
-                  .fontWeight(FontWeight.Medium)
-                  .fontColor($r('app.color.color_text_primary'))
-                Text('点击下方「记一笔」开始，点击日历上的日期可查看详情')
-                  .fontSize(12)
-                  .fontColor($r('app.color.color_text_secondary'))
-                  .textAlign(TextAlign.Center)
-              }
-              .width('100%')
-              .margin({ top: 24, left: 16, right: 16 })
-            }
-
-            Blank()
-              .layoutWeight(1)
-
+            // 主操作常驻底部：不再依赖剩余高度，任何屏幕都能点到
             Button('＋ 记一笔')
               .width('100%')
-              .height(50)
+              .constraintSize({ minHeight: 50 })
               .fontSize(17)
               .fontColor($r('app.color.color_white'))
               .backgroundColor($r('app.color.color_primary'))
               .borderRadius(25)
-              // 内容延伸到栏下后，底部留出胶囊的高度，避免按钮被胶囊遮挡
-              .margin({ left: 16, right: 16, bottom: 64 })
+              .margin({ top: 8 })
               .onClick(() => {
                 this.addRecord();
               })
+              .accessibilityText('记一笔')
           }
           .width('100%')
           .height('100%')
+          .padding({ left: PAGE_PADDING, right: PAGE_PADDING, bottom: PAGE_BOTTOM_PADDING })
           .backgroundColor($r('app.color.color_bg'))
+          // 切换 Tab 时的淡入 + 轻微上滑，掩盖首帧构建的耗时
+          .opacity(this.contentAlpha)
+          .translate({ y: this.contentOffsetY })
           .bindSheet($$this.showDaySheet, this.daySheet(), {
             height: 440,
             showClose: true,
             dragBar: true,
-            backgroundColor: $r('app.color.color_bg')
+            backgroundColor: $r('app.color.color_card')
           })
         }
-        .tabBar(this.InvisibleTabCell(0))
+        .tabBar(this.capsuleItem($r('sys.symbol.calendar'), '日历', 0))
 
-        // 标签 2：统计
         TabContent() {
-          StatsPage({ refreshTick: this.statsTick })
+          Column() {
+            StatsPage({ refreshTick: this.statsTick })
+          }
+          .width('100%')
+          .height('100%')
+          .opacity(this.contentAlpha)
+          .translate({ y: this.contentOffsetY })
         }
-        .tabBar(this.InvisibleTabCell(1))
+        .tabBar(this.capsuleItem($r('sys.symbol.square_grid_2x2'), '统计', 1))
 
-        // 标签 3：设置
         TabContent() {
-          SettingsPage()
+          Column() {
+            SettingsPage()
+          }
+          .width('100%')
+          .height('100%')
+          .opacity(this.contentAlpha)
+          .translate({ y: this.contentOffsetY })
         }
-        .tabBar(this.InvisibleTabCell(2))
+        .tabBar(this.capsuleItem($r('sys.symbol.gearshape'), '设置', 2))
       }
-      .barHeight(54)
-
+      .barPosition(BarPosition.End)
       .barBackgroundColor(Color.Transparent)
-      // 内容延伸到栏下（沉浸式），配合悬浮胶囊使用
       .barOverlap(true)
-      // 即时切换：去掉默认滑动动画，避免切换时掉帧卡顿
+      .barFloatingStyle(this.barFloatingStyle())
       .animationDuration(150)
-      .onChange((idx: number) => {
-        this.currentTab = idx;
-        if (idx === 1) {
-          // 等切换动画播完再刷新统计，避免与动画抢帧
-          setTimeout(() => {
-            this.statsTick++;
-          }, 220);
+      // 预加载：三个页面首次渲染时就全部构建好，避免首次点「统计」现场构建 Canvas 图表造成卡顿
+      .cachedMaxCount(3, TabsCacheMode.CACHE_BOTH_SIDE)
+      // onSelected 在切换动画**开始**时回调（onChange 在结束时），用它兜住手势滑动切换的场景
+      .onSelected((idx: number) => {
+        if (this.currentTab !== idx) {
+          const backToCalendar: boolean = idx === 0;
+          this.currentTab = idx;
+          if (backToCalendar) {
+            this.refresh();
+          }
         }
       })
-
-      // 悬浮胶囊标签栏：覆盖在底部，四周留白 + 毛玻璃光感 + 阴影
-      Row() {
-        Row({ space: 4 }) {
-          this.capsuleItem('🗓️', '日历', 0)
-          this.capsuleItem('📊', '统计', 1)
-          this.capsuleItem('⚙️', '设置', 2)
+      .onChange((idx: number) => {
+        // 动画结束：只做状态对齐，不再在这里触发统计页重算（数据变化由 refresh() 通知）
+        if (this.currentTab !== idx) {
+          this.currentTab = idx;
         }
-        .height(46)
-        .padding({ left: 8, right: 8 })
-        .borderRadius(23)
-        .backgroundColor($r('app.color.color_tabbar_bg'))
-        .backgroundEffect({
-          radius: 20,
-          saturation: 1.5,
-          brightness: 1.0
-        })
-        .shadow({
-          radius: 18,
-          color: '#33000000',
-          offsetX: 0,
-          offsetY: 6
-        })
-        .margin({ left: 24, right: 24 })
-      }
-      .width('100%')
-      .margin({ bottom: 8 + this.insets.bottom })
+      })
       }
       .width('100%')
       .height('100%')
       .backgroundColor($r('app.color.color_bg'))
       .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.BOTTOM])
     }
+    .titleBar(this.titleBarOptions())
     .mode(NavigationMode.Stack)
     .navDestination(this.PageMap)
   }
 
-  private isCurrentMonth(): boolean {
+  /** 只有往回看时才允许继续往后翻月（当前月不能再往后） */
+  private canGoNextMonth(): boolean {
     const now = new Date();
     return !(this.viewYear === now.getFullYear() && this.viewMonth === now.getMonth());
   }

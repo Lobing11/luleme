@@ -25,8 +25,8 @@ export async function loadSafeAreaInsets(ui: UIContext): Promise<SafeAreaInsets>
     const top = ui.px2vp(area.topRect.height);
     const bottom = ui.px2vp(area.bottomRect.height);
     return {
-      top: top > 0 ? top : 24,
-      bottom: bottom > 0 ? bottom : 16
+      top: Math.max(0, top),
+      bottom: Math.max(0, bottom)
     };
   } catch (err) {
     return { top: 24, bottom: 16 };
