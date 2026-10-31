@@ -2,6 +2,7 @@ import { Record } from '../model/RecordModel';
 import { moodEmoji, formatDateTime } from '../model/RecordModel';
 import { RecordRepository } from '../data/RecordRepository';
 import { SettingsStore } from '../data/SettingsStore';
+import { GESHEN_TEXT } from '../logic/ReminderScheduler';
 import { CalendarHeatmap } from '../components/CalendarHeatmap';
 import { RecordEdit } from './RecordEdit';
 import { StatsPage } from './Stats';
@@ -52,9 +53,6 @@ struct Index {
   private tabsController: HdsTabsController = new HdsTabsController();
 
   @State currentTab: number = 0;
-  /** 页面内容切换时的淡入/微位移（由 selectTab 驱动，掩盖新页面首帧构建的开销） */
-  @State contentAlpha: number = 1;
-  @State contentOffsetY: number = 0;
   /** 上一个 Tab 切换时间戳，用于丢弃连点产生的重复切换 */
   private lastTabSwitchMs: number = 0;
   @State statsTick: number = 0;
@@ -73,6 +71,13 @@ struct Index {
   @State sheetDateMs: number = 0;
   @State sheetTitle: string = '';
   @State sheetRecords: Record[] = [];
+
+  /** 删除后 3 秒内可撤销：只在内存里留"最近一条"被删记录 */
+  @State undoVisible: boolean = false;
+  // 应用内提醒：后台提醒不可用时，至少保证打开应用能看到
+  @State reminderBanner: string = '';
+  private undoRecord: Record | null = null;
+  private undoTimer: number = -1;
 
   /**
    * 记录变更回调：任何页面（新增 / 编辑 / 删除 / 清空 / 导入）写库后都会广播，
@@ -122,6 +127,39 @@ struct Index {
     }
   }
 
+  /**
+   * 计算「打开应用时」的提醒文案。
+   *
+   * 背景：部分机型未通过系统提醒能力校验，reminderAgentManager.publishReminder 恒失败
+   * （错误码 1700002），后台提醒无法送达。此时降级为应用内提示：到点且当天还没记录就提示。
+   */
+  private async updateReminderBanner(): Promise<void> {
+    let message: string = '';
+    try {
+      const store = SettingsStore.getInstance();
+      if (await store.isReminderEnabled()) {
+        const hour: number = await store.getReminderHour();
+        const minute: number = await store.getReminderMinute();
+        const now = new Date();
+        const passed: boolean = now.getHours() * 60 + now.getMinutes() >= hour * 60 + minute;
+        if (passed && this.todayTotal === 0) {
+          message = await store.getReminderText();
+        }
+      }
+      if (message.length === 0 && await store.isGeshenEnabled() && this.records.length > 0) {
+        const elapsed: number = Date.now() - this.records[0].timestamp;
+        if (elapsed >= 8 * 60 * 60 * 1000) {
+          message = GESHEN_TEXT;
+        }
+      }
+    } catch (err) {
+      message = '';
+    }
+    if (message !== this.reminderBanner) {
+      this.reminderBanner = message;
+    }
+  }
+
   private async refresh(): Promise<void> {
     try {
       const all = await RecordRepository.getInstance().getAll();
@@ -129,6 +167,7 @@ struct Index {
       this.recomputeStats();
       // 数据变了才通知统计页重算；切换 Tab 本身不再触发任何数据读取
       this.statsTick++;
+      await this.updateReminderBanner();
     } catch (err) {
       // 读库失败时保留上一版数据，但要把原因留在日志里
       // （此前这里是空 catch，初始化竞态被静默吞掉，排查时没有任何线索）
@@ -223,7 +262,7 @@ struct Index {
   private confirmDelete(id: number): void {
     this.getUIContext().showAlertDialog({
       title: '删除这条记录？',
-      message: '删除后无法恢复',
+      message: '删除后 3 秒内可撤销',
       primaryButton: {
         value: '取消',
         action: () => {
@@ -239,11 +278,56 @@ struct Index {
     });
   }
 
+  /**
+   * 删除记录。
+   *
+   * 这里不再弹"已删除"就走人 —— 误删是这类应用的致命伤，所以删完在面板里留 3 秒撤销条。
+   * 记录本身已从库里删掉，撤销是把同一条（时间/心情/备注）重新插回去；id 会变，但用户不可见。
+   */
   private async deleteRecord(id: number): Promise<void> {
+    let removed: Record | null = null;
+    for (let i = 0; i < this.sheetRecords.length; i++) {
+      if (this.sheetRecords[i].id === id) {
+        removed = this.sheetRecords[i];
+        break;
+      }
+    }
     await RecordRepository.getInstance().remove(id);
     await this.refresh();
     this.sheetRecords = recordsOnDay(this.records, this.sheetDateMs);
-    this.getUIContext().getPromptAction().showToast({ message: '已删除' });
+    if (removed !== null) {
+      this.showUndoBar(removed);
+    }
+  }
+
+  private showUndoBar(record: Record): void {
+    this.undoRecord = record;
+    this.undoVisible = true;
+    if (this.undoTimer >= 0) {
+      clearTimeout(this.undoTimer);
+    }
+    this.undoTimer = setTimeout(() => {
+      this.undoTimer = -1;
+      this.undoVisible = false;
+      this.undoRecord = null;
+    }, 3000);
+  }
+
+  private async undoDelete(): Promise<void> {
+    const record: Record | null = this.undoRecord;
+    if (record === null) {
+      return;
+    }
+    if (this.undoTimer >= 0) {
+      clearTimeout(this.undoTimer);
+      this.undoTimer = -1;
+    }
+    this.undoVisible = false;
+    this.undoRecord = null;
+    await RecordRepository.getInstance().add(record.timestamp, record.mood, record.note);
+    await this.refresh();
+    this.sheetRecords = recordsOnDay(this.records, this.sheetDateMs);
+    this.getUIContext().getPromptAction().showToast({ message: '已恢复' });
   }
 
   @Builder
@@ -266,14 +350,16 @@ struct Index {
   }
 
   /**
-   * 底部 Tab 切换（跟手 + 防连点 + 转场）
+   * 底部 Tab 切换（跟手 + 防连点）
    *
-   * 之前的问题：高亮状态只在 HdsTabs 的 onChange 里更新，而 onChange 是在**切换动画结束后**
-   * 才回调的，所以手指点下去到高亮变色之间有一段空窗，主观上就是"点了没反应"。
-   * 现在的顺序：
-   *   1) 同步改 currentTab —— 同一帧内高亮/标题就变（跟手）；
-   *   2) 新内容以略低的透明度和 6vp 位移起帧；
-   *   3) 交给 HdsTabs 做内容翻转，下一帧再把透明度/位移动画回正常值（淡入 + 轻微上滑）。
+   * 之前有两个问题：
+   *   1) 高亮状态只在 HdsTabs 的 onChange 里更新，而 onChange 在**切换动画结束后**才回调，
+   *      于是点下去到高亮变色之间有 ~150ms 空窗，主观上就是"点了没反应"；
+   *   2) 为了掩盖首帧构建开销，又给三个页面根容器挂了「opacity 0.86→1 + 上浮 6vp」的自定义动画。
+   *      这套动画和 HdsTabs 自己的横向位移同时进行，两个方向叠加，观感就是"抖一下/弹一下"。
+   *
+   * 现在：点击先同步 currentTab（高亮与标题同帧变化），位移交给 HdsTabs，
+   * 页面本身不再叠任何自定义动画 —— 三个页面早已被 cachedMaxCount 预构建，没有需要掩盖的首帧开销。
    */
   private selectTab(idx: number): void {
     if (idx === this.currentTab) {
@@ -286,23 +372,11 @@ struct Index {
     this.lastTabSwitchMs = now;
 
     this.currentTab = idx;
-    this.contentAlpha = 0.86;
-    this.contentOffsetY = 6;
     this.tabsController.changeIndex(idx);
     if (idx === 0) {
       // 回到日历时补一次读库：其他 Tab 里清空/导入数据后，日历页也能立刻对齐
       this.refresh();
     }
-
-    setTimeout(() => {
-      this.getUIContext().animateTo({
-        duration: 220,
-        curve: Curve.FastOutSlowIn
-      }, () => {
-        this.contentAlpha = 1;
-        this.contentOffsetY = 0;
-      });
-    }, 16);
   }
 
   /** 标题栏沉浸光感（HdsNavigation.titleBar.style） */
@@ -432,6 +506,67 @@ struct Index {
   }
 
   @Builder
+  reminderBannerCard() {
+    Row({ space: 10 }) {
+      Text('🦌')
+        .fontSize(20)
+      Column({ space: 2 }) {
+        Text(this.reminderBanner)
+          .fontSize(14)
+          .fontWeight(FontWeight.Medium)
+          .fontColor($r('app.color.color_text_primary'))
+          .maxLines(2)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+        Text('打开应用时提醒 · 后台通知需系统授权')
+          .fontSize(11)
+          .fontColor($r('app.color.color_text_secondary'))
+      }
+      .alignItems(HorizontalAlign.Start)
+      .layoutWeight(1)
+
+      Button('知道了')
+        .fontSize(12)
+        .height(30)
+        .padding({ left: 12, right: 12 })
+        .fontColor($r('app.color.color_primary'))
+        .backgroundColor($r('app.color.color_primary_soft'))
+        .borderRadius(15)
+        .onClick(() => {
+          this.reminderBanner = '';
+        })
+        .accessibilityText('关闭提醒')
+    }
+    .width('100%')
+    .padding({ left: 14, right: 10, top: 10, bottom: 10 })
+    .borderRadius(CARD_RADIUS)
+    .backgroundColor($r('app.color.color_card'))
+  }
+
+  @Builder
+  undoBar() {
+    Row({ space: 12 }) {
+      Text('已删除 1 条记录')
+        .fontSize(13)
+        .fontColor($r('app.color.color_text_primary'))
+      Blank()
+      Button('撤销')
+        .fontSize(13)
+        .height(32)
+        .fontColor($r('app.color.color_white'))
+        .backgroundColor($r('app.color.color_primary'))
+        .borderRadius(16)
+        .onClick(() => {
+          this.undoDelete();
+        })
+        .accessibilityText('撤销删除')
+    }
+    .width('100%')
+    .padding({ left: 12, right: 12, top: 6, bottom: 6 })
+    .borderRadius(12)
+    .backgroundColor($r('app.color.color_primary_soft'))
+  }
+
+  @Builder
   daySheet() {
     Column({ space: 8 }) {
       Text(this.sheetTitle)
@@ -458,6 +593,9 @@ struct Index {
         }
         .layoutWeight(1)
         .width('100%')
+      }
+      if (this.undoVisible) {
+        this.undoBar()
       }
       Button('添加一条记录')
         .width('100%')
@@ -554,6 +692,10 @@ struct Index {
                 }
                 .width('100%')
 
+                if (this.reminderBanner.length > 0) {
+                  this.reminderBannerCard()
+                }
+
                 if (this.grandTotal === 0) {
                   EmptyState({ title: '还没有记录', desc: '点击下方按钮开始记录，点日历格可查看当天详情' })
                     .width('100%')
@@ -586,9 +728,6 @@ struct Index {
           .height('100%')
           .padding({ left: PAGE_PADDING, right: PAGE_PADDING, bottom: PAGE_BOTTOM_PADDING })
           .backgroundColor($r('app.color.color_bg'))
-          // 切换 Tab 时的淡入 + 轻微上滑，掩盖首帧构建的耗时
-          .opacity(this.contentAlpha)
-          .translate({ y: this.contentOffsetY })
           .bindSheet($$this.showDaySheet, this.daySheet(), {
             height: 440,
             showClose: true,
@@ -604,8 +743,6 @@ struct Index {
           }
           .width('100%')
           .height('100%')
-          .opacity(this.contentAlpha)
-          .translate({ y: this.contentOffsetY })
         }
         .tabBar(this.capsuleItem($r('sys.symbol.square_grid_2x2'), '统计', 1))
 
@@ -615,8 +752,6 @@ struct Index {
           }
           .width('100%')
           .height('100%')
-          .opacity(this.contentAlpha)
-          .translate({ y: this.contentOffsetY })
         }
         .tabBar(this.capsuleItem($r('sys.symbol.gearshape'), '设置', 2))
       }
@@ -624,7 +759,7 @@ struct Index {
       .barBackgroundColor(Color.Transparent)
       .barOverlap(true)
       .barFloatingStyle(this.barFloatingStyle())
-      .animationDuration(150)
+      .animationDuration(220)
       // 预加载：三个页面首次渲染时就全部构建好，避免首次点「统计」现场构建 Canvas 图表造成卡顿
       .cachedMaxCount(3, TabsCacheMode.CACHE_BOTH_SIDE)
       // onSelected 在切换动画**开始**时回调（onChange 在结束时），用它兜住手势滑动切换的场景

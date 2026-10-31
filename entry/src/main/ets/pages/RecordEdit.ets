@@ -8,6 +8,7 @@ import { RecordRepository } from '../data/RecordRepository';
 import { Record } from '../model/RecordModel';
 import { MOODS, DEFAULT_MOOD, MoodOption } from '../model/RecordModel';
 import { RecordEditParam } from '../common/Constants';
+import { ReminderScheduler } from '../logic/ReminderScheduler';
 import { CARD_RADIUS, PAGE_PADDING } from '../common/DesignTokens';
 
 const DATE_PICKER_START: number = 2015;
@@ -59,6 +60,10 @@ export struct RecordEdit {
         this.getUIContext().getPromptAction().showToast({ message: '已保存修改' });
       } else {
         await repo.add(this.dateMs, this.mood, this.note);
+        // 葛神模式：每次新增记录后重建"8 小时后"的一次性提醒（开关关闭时内部直接返回）。
+        // 这里用当前时间而不是记录时间：补记昨天的记录时，仍然应该是"从此刻起 8 小时"，
+        // 否则触发时间会落在过去，系统会直接拒收。
+        await ReminderScheduler.getInstance().onRecordCreated(Date.now());
         this.getUIContext().getPromptAction().showToast({ message: '已记录' });
       }
       this.queryNavigationInfo()?.pathStack.pop();

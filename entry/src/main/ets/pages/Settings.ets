@@ -1,11 +1,22 @@
 import { picker, fileIo } from '@kit.CoreFileKit';
 import { common, bundleManager } from '@kit.AbilityKit';
+import { hilog } from '@kit.PerformanceAnalysisKit';
+import { BusinessError } from '@kit.BasicServicesKit';
 import { util } from '@kit.ArkTS';
+import { window } from '@kit.ArkUI';
 import { hdsMaterial } from '@kit.UIDesignKit';
+import { notificationManager } from '@kit.NotificationKit';
 import { SettingsStore } from '../data/SettingsStore';
 import { RecordRepository } from '../data/RecordRepository';
 import { Record, parseRecord } from '../model/RecordModel';
 import { hashPin, verifyPin, randomSalt, getBiometricStatus } from '../logic/SecurityUtil';
+import {
+  ReminderScheduler,
+  DailyReminderConfig,
+  DEFAULT_REMINDER_HOUR,
+  DEFAULT_REMINDER_MINUTE,
+  DEFAULT_REMINDER_TEXT
+} from '../logic/ReminderScheduler';
 import {
   MaterialLevelOption,
   MATERIAL_LEVEL_OPTIONS,
@@ -31,6 +42,25 @@ function readVersionLabel(): string {
   }
 }
 
+function pad2(n: number): string {
+  return n < 10 ? `0${n}` : `${n}`;
+}
+
+/**
+ * 导出文件名：luleme_backup_20261030-2312.json
+ *
+ * 三条约束：
+ *   1) 纯英文前缀 —— 备份会落到公共目录 / 网盘，中文名等于自曝内容性质；
+ *   2) 时间戳用 YYYYMMDD-HHmm，不含冒号（跨文件系统最安全），且可按名排序；
+ *   3) 后缀只写在这里一次 —— 曾经同时传 fileSuffixChoices，导致出现 .json.json 或后缀被吃掉。
+ */
+function backupFileName(ts: number): string {
+  const d = new Date(ts);
+  const date = `${d.getFullYear()}${pad2(d.getMonth() + 1)}${pad2(d.getDate())}`;
+  const time = `${pad2(d.getHours())}${pad2(d.getMinutes())}`;
+  return `luleme_backup_${date}-${time}.json`;
+}
+
 @Component
 export struct SettingsPage {
   @State materialLevel: hdsMaterial.MaterialLevel = hdsMaterial.MaterialLevel.ADAPTIVE;
@@ -48,6 +78,20 @@ export struct SettingsPage {
   /** 从 bundle 读取的真实版本号（避免界面里再手写一份 versionName） */
   @State appVersion: string = '';
 
+  // ---- 每日定时提醒 ----
+  @State reminderEnabled: boolean = false;
+  @State reminderHour: number = DEFAULT_REMINDER_HOUR;
+  @State reminderMinute: number = DEFAULT_REMINDER_MINUTE;
+  @State reminderText: string = DEFAULT_REMINDER_TEXT;
+  /** 文案输入的防抖计时器：连续输入时只在停手后写一次库 + 重发一次提醒 */
+  private reminderTextTimer: number = -1;
+
+  // ---- 葛神模式：记录后 8 小时提醒 ----
+  @State geshenEnabled: boolean = false;
+
+  // ---- 防截屏 ----
+  @State privacyMode: boolean = true;
+
   aboutToAppear(): void {
     this.appVersion = readVersionLabel();
     this.load();
@@ -62,6 +106,165 @@ export struct SettingsPage {
     const status = await getBiometricStatus();
     this.bioAvailable = status.hardwareSupported;
     this.bioEnrolled = status.enrolled;
+    this.reminderEnabled = await store.isReminderEnabled();
+    this.reminderHour = await store.getReminderHour();
+    this.reminderMinute = await store.getReminderMinute();
+    this.reminderText = await store.getReminderText();
+    this.geshenEnabled = await store.isGeshenEnabled();
+    this.privacyMode = await store.isPrivacyModeEnabled();
+  }
+
+  // ---------------- 提醒 ----------------
+
+  private reminderTimeLabel(): string {
+    return `${pad2(this.reminderHour)}:${pad2(this.reminderMinute)}`;
+  }
+
+  /**
+   * 提醒最终是走系统通知通道送达的，所以必须先把应用的通知开关打开。
+   *
+   * 实测：通知被关掉时 publishReminder 会直接失败（hilog: "notification not allowed" /
+   * "The number of reminders exceeds the limit[0]"），此时界面若不提示，用户会以为"开了但没响"。
+   */
+  private async ensureNotificationAllowed(): Promise<boolean> {
+    try {
+      if (notificationManager.isNotificationEnabledSync()) {
+        return true;
+      }
+      const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
+      await notificationManager.requestEnableNotification(context);
+      const after: boolean = await notificationManager.isNotificationEnabled();
+      return after;
+    } catch (err) {
+      const e = err as BusinessError;
+      hilog.error(0x0000, 'Reminder', 'request notification failed: %{public}s %{public}s', `${e.code}`, e.message);
+      return false;
+    }
+  }
+
+  /**
+   * 写设置 + 重新发布提醒。
+   * 文案输入是逐字符触发的，所以调用方用 `toast` 参数区分"要不要弹提示"。
+   */
+  private async persistReminder(toast: boolean): Promise<void> {
+    const store = SettingsStore.getInstance();
+    await store.setReminderEnabled(this.reminderEnabled);
+    await store.setReminderHour(this.reminderHour);
+    await store.setReminderMinute(this.reminderMinute);
+    await store.setReminderText(this.reminderText);
+
+    if (!this.reminderEnabled) {
+      await ReminderScheduler.getInstance().cancelDaily();
+      return;
+    }
+    const allowed: boolean = await this.ensureNotificationAllowed();
+    if (!allowed) {
+      this.reminderEnabled = false;
+      await store.setReminderEnabled(false);
+      this.getUIContext().getPromptAction().showToast({ message: '需要允许通知才能收到提醒' });
+      return;
+    }
+    const config: DailyReminderConfig = {
+      hour: this.reminderHour,
+      minute: this.reminderMinute,
+      text: this.reminderText.length > 0 ? this.reminderText : DEFAULT_REMINDER_TEXT
+    };
+    const scheduler = ReminderScheduler.getInstance();
+    const ok: boolean = await scheduler.applyDaily(config);
+    if (!ok) {
+      if (scheduler.lastErrorCode === 1700002) {
+        // 1700002：系统未开放后台提醒能力（部分机型需通过 AGC 能力校验）。
+        // 这种情况下不假装失败，而是保留开关并降级为「打开应用时提醒」。
+        if (toast) {
+          this.getUIContext().getPromptAction().showToast({
+            message: '当前设备不支持后台提醒，已改为打开应用时提醒'
+          });
+        }
+        return;
+      }
+      // 其它错误（例如通知被系统关闭）就把开关退回关闭，避免"看起来开了但不会响"
+      this.reminderEnabled = false;
+      await store.setReminderEnabled(false);
+      this.getUIContext().getPromptAction().showToast({ message: '提醒设置失败，请检查系统设置' });
+      return;
+    }
+    if (toast) {
+      this.getUIContext().getPromptAction().showToast({
+        message: `已设置每天 ${this.reminderTimeLabel()} 提醒`
+      });
+    }
+  }
+
+  private async onToggleReminder(v: boolean): Promise<void> {
+    this.reminderEnabled = v;
+    await this.persistReminder(v);
+  }
+
+  private pickReminderTime(): void {
+    if (!this.reminderEnabled) {
+      return;
+    }
+    const selected = new Date();
+    selected.setHours(this.reminderHour, this.reminderMinute, 0, 0);
+    this.getUIContext().showTimePickerDialog({
+      selected: selected,
+      useMilitaryTime: true,
+      onAccept: (value: TimePickerResult) => {
+        this.reminderHour = value.hour;
+        this.reminderMinute = value.minute;
+        this.persistReminder(true);
+      }
+    });
+  }
+
+  private onReminderTextChange(value: string): void {
+    this.reminderText = value;
+    if (this.reminderTextTimer >= 0) {
+      clearTimeout(this.reminderTextTimer);
+    }
+    this.reminderTextTimer = setTimeout(() => {
+      this.reminderTextTimer = -1;
+      this.persistReminder(false);
+    }, 800);
+  }
+
+  private async onToggleGeshen(v: boolean): Promise<void> {
+    this.geshenEnabled = v;
+    await SettingsStore.getInstance().setGeshenEnabled(v);
+    const scheduler = ReminderScheduler.getInstance();
+    if (!v) {
+      await scheduler.cancelGeshen();
+      return;
+    }
+    const allowed: boolean = await this.ensureNotificationAllowed();
+    if (!allowed) {
+      this.geshenEnabled = false;
+      await SettingsStore.getInstance().setGeshenEnabled(false);
+      this.getUIContext().getPromptAction().showToast({ message: '需要允许通知才能收到提醒' });
+      return;
+    }
+    this.getUIContext().getPromptAction().showToast({
+      message: '葛神模式：记录后 8 小时提醒你再来一次'
+    });
+    // 开启时按"最近一次记录"安排：没有记录就等下次记录后再生效
+    const records: Record[] = await RecordRepository.getInstance().getAll();
+    const lastTs: number = records.length > 0 ? records[0].timestamp : 0;
+    await scheduler.syncGeshenFromLastRecord(lastTs);
+    this.getUIContext().getPromptAction().showToast({
+      message: lastTs > 0 ? '已按最近一次记录安排提醒' : '已开启，下次记录后 8 小时提醒'
+    });
+  }
+
+  private async onTogglePrivacy(v: boolean): Promise<void> {
+    this.privacyMode = v;
+    await SettingsStore.getInstance().setPrivacyModeEnabled(v);
+    try {
+      const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
+      const mainWindow = await window.getLastWindow(context);
+      await mainWindow.setWindowPrivacyMode(v);
+    } catch (err) {
+      this.getUIContext().getPromptAction().showToast({ message: '隐私模式设置失败' });
+    }
   }
 
   private async onToggleLock(v: boolean): Promise<void> {
@@ -170,9 +373,10 @@ export struct SettingsPage {
     try {
       const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
       const documentPicker = new picker.DocumentViewPicker(context);
+      // 只传带后缀的文件名，不再传 fileSuffixChoices：
+      // 两处都声明后缀时，不同文件管理器会拼成 xxx.json.json，或反过来把后缀吃掉。
       const uris: string[] = await documentPicker.save({
-        newFileNames: ['luleme_backup.json'],
-        fileSuffixChoices: ['json']
+        newFileNames: [backupFileName(Date.now())]
       });
       if (uris.length === 0) {
         return;
@@ -192,7 +396,12 @@ export struct SettingsPage {
       } finally {
         fileIo.closeSync(file);
       }
-      this.getUIContext().getPromptAction().showToast({ message: `已导出 ${records.length} 条记录` });
+      // 兜底校验：个别文件管理器会按"类型"重命名所选文件，后缀不对时至少把真实文件名告诉用户
+      const savedName: string = uris[0].substring(uris[0].lastIndexOf('/') + 1);
+      const suffixOk: boolean = savedName.toLowerCase().endsWith('.json');
+      this.getUIContext().getPromptAction().showToast({
+        message: suffixOk ? `已导出 ${records.length} 条记录` : `已导出 ${records.length} 条（${savedName}）`
+      });
     } catch (err) {
       this.getUIContext().getPromptAction().showToast({ message: '导出失败' });
     } finally {
@@ -351,6 +560,112 @@ export struct SettingsPage {
     return this.lockEnabled && this.hasPin && this.bioAvailable;
   }
 
+  /** 定时提醒行：副标题依赖开关与时间，零参直读 @State（@Builder 按值传参会被冻结） */
+  @Builder
+  reminderRow() {
+    Row() {
+      Column({ space: 2 }) {
+        Text('定时提醒')
+          .fontSize(15)
+          .fontColor($r('app.color.color_text_primary'))
+        Text(this.reminderEnabled ? `每天 ${this.reminderTimeLabel()}` : '关闭时不发送任何提醒')
+          .fontSize(12)
+          .fontColor($r('app.color.color_text_secondary'))
+      }
+      .alignItems(HorizontalAlign.Start)
+      .layoutWeight(1)
+    }
+    .layoutWeight(1)
+  }
+
+  /** 葛神模式行 */
+  @Builder
+  geshenRow() {
+    Row() {
+      Column({ space: 2 }) {
+        Text('葛神模式')
+          .fontSize(15)
+          .fontColor($r('app.color.color_text_primary'))
+        Text(this.geshenEnabled ? '记录后 8 小时提醒一次' : '记录后 8 小时，提醒你变得更强')
+          .fontSize(12)
+          .fontColor($r('app.color.color_text_secondary'))
+      }
+      .alignItems(HorizontalAlign.Start)
+      .layoutWeight(1)
+    }
+    .layoutWeight(1)
+  }
+
+  /** 防截屏行 */
+  @Builder
+  privacyRow() {
+    Row() {
+      Column({ space: 2 }) {
+        Text('防截屏保护')
+          .fontSize(15)
+          .fontColor($r('app.color.color_text_primary'))
+        Text(this.privacyMode ? '截屏与最近任务缩略图已遮罩' : '已关闭，允许截屏与任务预览')
+          .fontSize(12)
+          .fontColor($r('app.color.color_text_secondary'))
+      }
+      .alignItems(HorizontalAlign.Start)
+      .layoutWeight(1)
+    }
+    .layoutWeight(1)
+  }
+
+  /** 提醒时间行：点击弹出系统时间选择器（关闭提醒时整行置灰） */
+  @Builder
+  reminderTimeRow() {
+    Row() {
+      Text('提醒时间')
+        .fontSize(15)
+        .fontColor($r('app.color.color_text_primary'))
+      Blank()
+      Text(this.reminderTimeLabel())
+        .fontSize(15)
+        .fontColor(this.reminderEnabled ? $r('app.color.color_primary') : $r('app.color.color_text_secondary'))
+      SymbolGlyph($r('sys.symbol.chevron_right'))
+        .fontSize(16)
+        .fontColor([$r('app.color.color_text_secondary')])
+    }
+    .width('100%')
+    .height(ROW_HEIGHT)
+    .padding({ left: CARD_PADDING, right: CARD_PADDING })
+    .enabled(this.reminderEnabled)
+    .opacity(this.reminderEnabled ? 1 : 0.4)
+    .onClick(() => {
+      this.pickReminderTime();
+    })
+    .accessibilityText('提醒时间')
+  }
+
+  /** 提醒文案：会直接出现在锁屏，所以明确告知用户 */
+  @Builder
+  reminderTextRow() {
+    Column({ space: 6 }) {
+      Text('提醒文案')
+        .fontSize(15)
+        .fontColor($r('app.color.color_text_primary'))
+      TextInput({ text: this.reminderText, placeholder: DEFAULT_REMINDER_TEXT })
+        .maxLength(30)
+        .height(44)
+        .borderRadius(10)
+        .backgroundColor($r('app.color.color_bg'))
+        .enabled(this.reminderEnabled)
+        .onChange((v: string) => {
+          this.onReminderTextChange(v);
+        })
+      Text('会显示在锁屏与通知中心')
+        .fontSize(11)
+        .fontColor($r('app.color.color_text_secondary'))
+    }
+    .alignItems(HorizontalAlign.Start)
+    .width('100%')
+    .padding({ left: CARD_PADDING, right: CARD_PADDING, top: 12, bottom: 12 })
+    .opacity(this.reminderEnabled ? 1 : 0.4)
+  }
+
   @Builder
   pinSetupPanel() {
     Column({ space: 10 }) {
@@ -464,6 +779,21 @@ export struct SettingsPage {
             .height(ROW_HEIGHT)
             // 不可用时整行置灰：避免"看起来能点、点了没反应"
             .opacity(this.bioToggleEnabled() ? 1 : 0.4)
+            Divider()
+              .color($r('app.color.color_border'))
+              .margin({ left: DIVIDER_INSET, right: DIVIDER_INSET })
+            Row() {
+              this.privacyRow()
+              Toggle({ type: ToggleType.Switch, isOn: this.privacyMode })
+                .selectedColor($r('app.color.color_primary'))
+                .onChange((v: boolean) => {
+                  this.onTogglePrivacy(v);
+                })
+                .accessibilityText('防截屏保护开关')
+            }
+            .width('100%')
+            .padding({ left: CARD_PADDING, right: CARD_PADDING })
+            .height(ROW_HEIGHT)
           }
           .width('100%')
           .borderRadius(CARD_RADIUS)
@@ -523,6 +853,48 @@ export struct SettingsPage {
           }
           .width('100%')
           .padding(CARD_PADDING)
+          .borderRadius(CARD_RADIUS)
+          .backgroundColor($r('app.color.color_card'))
+
+          this.sectionTitle('提醒')
+          Column({ space: 0 }) {
+            Row() {
+              this.reminderRow()
+              Toggle({ type: ToggleType.Switch, isOn: this.reminderEnabled })
+                .selectedColor($r('app.color.color_primary'))
+                .onChange((v: boolean) => {
+                  this.onToggleReminder(v);
+                })
+                .accessibilityText('定时提醒开关')
+            }
+            .width('100%')
+            .padding({ left: CARD_PADDING, right: CARD_PADDING })
+            .height(ROW_HEIGHT)
+            Divider()
+              .color($r('app.color.color_border'))
+              .margin({ left: DIVIDER_INSET, right: DIVIDER_INSET })
+            this.reminderTimeRow()
+            Divider()
+              .color($r('app.color.color_border'))
+              .margin({ left: DIVIDER_INSET, right: DIVIDER_INSET })
+            this.reminderTextRow()
+            Divider()
+              .color($r('app.color.color_border'))
+              .margin({ left: DIVIDER_INSET, right: DIVIDER_INSET })
+            Row() {
+              this.geshenRow()
+              Toggle({ type: ToggleType.Switch, isOn: this.geshenEnabled })
+                .selectedColor($r('app.color.color_primary'))
+                .onChange((v: boolean) => {
+                  this.onToggleGeshen(v);
+                })
+                .accessibilityText('葛神模式开关')
+            }
+            .width('100%')
+            .padding({ left: CARD_PADDING, right: CARD_PADDING })
+            .height(ROW_HEIGHT)
+          }
+          .width('100%')
           .borderRadius(CARD_RADIUS)
           .backgroundColor($r('app.color.color_card'))
 

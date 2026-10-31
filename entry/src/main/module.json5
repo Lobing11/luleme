@@ -13,6 +13,11 @@
     "requestPermissions": [
       {
         "name": "ohos.permission.ACCESS_BIOMETRIC"
+      },
+      {
+        // 系统级提醒代理：定时提醒 / 葛神模式通过 reminderAgentManager.publishReminder 发布，
+        // 由系统调度，应用无需后台常驻，重启后提醒依然有效
+        "name": "ohos.permission.PUBLISH_AGENT_REMINDER"
       }
     ],
     "abilities": [
